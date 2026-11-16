@@ -1,0 +1,4 @@
+module CCoAkkaManagedHost {
+  header "managed_host.h"
+  export *
+}

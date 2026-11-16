@@ -1,0 +1,4 @@
+Name: CoAkka HTTP Managed Host
+Description: CoAkka HTTP Runtime bridge for Swift
+Version: 2.3.1
+Libs: -L"${pcfiledir}" -lcoakka_http_managed_host
