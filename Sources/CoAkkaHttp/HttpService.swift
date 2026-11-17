@@ -105,13 +105,17 @@ public struct RequestEvent: Sendable {
 }
 
 /// A serialized service with one request event reader.
-public final class HttpService {
+// Mutable owner state is protected by lock. The outbound reader joins
+// the close owner through its separate guard before destruction.
+public final class HttpService: @unchecked Sendable {
     let lock = NSLock()
+    let outboundReader = NSLock()
     let exchangeOwner = ExchangeOwner()
     private var owner: OpaquePointer?
 
     public init(listener: HttpListener, routes: [HttpRoute], staticMounts: [StaticMount] = [],
-                fileAuthorities: [FileAuthority] = [], monitor: MonitorOptions? = nil) throws {
+                fileAuthorities: [FileAuthority] = [], monitor: MonitorOptions? = nil,
+                outbound: OutboundOptions? = nil) throws {
         guard routes.count <= 1024, staticMounts.count <= 32, fileAuthorities.count <= 32 else {
             throw CoreStatus.capacityExhausted
         }
@@ -174,14 +178,16 @@ public final class HttpService {
         }
         var failed = UInt32.max
         // Keep all descriptor storage alive until Core has copied it.
-        let status = withExtendedLifetime(arguments) {
-            definitions.withUnsafeBufferPointer { routes in
-                mounts.withUnsafeBufferPointer { mounts in
-                    authorities.withUnsafeBufferPointer { authorities in
-                        coakka_managed_create_with_files(
-                            &input, routes.baseAddress, UInt32(routes.count),
-                            mounts.baseAddress, UInt32(mounts.count),
-                            authorities.baseAddress, UInt32(authorities.count), &owner, &failed)
+        let status = try withExtendedLifetime(arguments) {
+            try definitions.withUnsafeBufferPointer { routes in
+                try mounts.withUnsafeBufferPointer { mounts in
+                    try authorities.withUnsafeBufferPointer { authorities in
+                        try Self.withOutboundConfig(outbound, arguments: arguments) { config in
+                            coakka_managed_create_configured(
+                                &input, routes.baseAddress, UInt32(routes.count),
+                                mounts.baseAddress, UInt32(mounts.count),
+                                authorities.baseAddress, UInt32(authorities.count), config, &owner, &failed)
+                        }
                     }
                 }
             }
@@ -454,7 +460,7 @@ public final class HttpService {
         }
     }
 
-    private static func projectFields(_ fields: [HttpField], arguments: NativeArguments)
+    static func projectFields(_ fields: [HttpField], arguments: NativeArguments)
         throws -> [coakka_http_host_header_t] {
         try fields.map { field in
             try coakka_http_host_header_t(name: arguments.add(field.name),
@@ -489,7 +495,16 @@ public final class HttpService {
     }
 
     public func close() throws {
-        try lock.withLock { try Self.check(coakka_managed_close(&owner)) }
+        try lock.withLock {
+            guard let owner else { return }
+            // The reader can release its lease and unlock without taking lock.
+            if !outboundReader.try() {
+                _ = coakka_managed_interrupt_outbound(owner)
+                outboundReader.lock()
+            }
+            defer { outboundReader.unlock() }
+            try Self.check(coakka_managed_close(&self.owner))
+        }
     }
 
     func handle() throws -> OpaquePointer {

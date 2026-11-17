@@ -14,8 +14,8 @@
 #define COAKKA_MANAGED_API __attribute__((visibility("default")))
 #endif
 
-/* Private bridge for the connector integration slice. Each language serializes
- * calls on one owner. The Core service is the only transport state owner. */
+/* Private language bridge. The connector owns its readers and serializes
+ * destruction with them. Core owns transport state and event leases. */
 typedef struct coakka_managed_host coakka_managed_host;
 
 typedef struct coakka_managed_event {
@@ -83,6 +83,24 @@ typedef struct coakka_managed_file_authority {
   uint32_t max_active_files;
 } coakka_managed_file_authority;
 
+typedef struct coakka_managed_outbound_config {
+  const coakka_http_host_outbound_target_t *targets;
+  uint32_t target_count;
+  const coakka_http_host_outbound_trust_t *trusts;
+  uint32_t trust_count;
+  const coakka_http_host_outbound_identity_t *identities;
+  uint32_t identity_count;
+} coakka_managed_outbound_config;
+
+typedef struct coakka_managed_outbound_result {
+  coakka_http_host_outbound_call_t call;
+  coakka_http_host_bytes_t logical_target, node_id, body, diagnostic;
+  uint64_t target_generation;
+  uint32_t reason, phase, retry, certainty, header_count;
+  int32_t provider_code;
+  uint16_t response_status;
+} coakka_managed_outbound_result;
+
 typedef struct coakka_managed_metadata {
   coakka_http_host_bytes_t scheme;
   coakka_http_host_bytes_t authority;
@@ -112,6 +130,38 @@ COAKKA_MANAGED_API int32_t coakka_managed_create_with_files(
     uint32_t count, const coakka_managed_static_mount *mounts,
     uint32_t mount_count, const coakka_managed_file_authority *authorities,
     uint32_t authority_count, coakka_managed_host **out, uint32_t *failed_route);
+COAKKA_MANAGED_API int32_t coakka_managed_create_configured(
+    const coakka_managed_listener *listener, const coakka_managed_route *routes,
+    uint32_t count, const coakka_managed_static_mount *mounts,
+    uint32_t mount_count, const coakka_managed_file_authority *authorities,
+    uint32_t authority_count, const coakka_managed_outbound_config *outbound,
+    coakka_managed_host **out, uint32_t *failed_route);
+
+COAKKA_MANAGED_API void coakka_managed_outbound_endpoint_init(
+    coakka_http_host_outbound_endpoint_t *endpoint);
+COAKKA_MANAGED_API void coakka_managed_outbound_target_init(
+    coakka_http_host_outbound_target_t *target);
+COAKKA_MANAGED_API void coakka_managed_outbound_trust_init(
+    coakka_http_host_outbound_trust_t *trust);
+COAKKA_MANAGED_API void coakka_managed_outbound_identity_init(
+    coakka_http_host_outbound_identity_t *identity);
+COAKKA_MANAGED_API int32_t coakka_managed_submit_outbound(
+    coakka_managed_host *host, uint32_t timeout_ms,
+    coakka_http_host_bytes_t logical_target, coakka_http_host_bytes_t method,
+    coakka_http_host_bytes_t target, const coakka_http_host_header_t *headers,
+    uint32_t header_count, coakka_http_host_bytes_t body,
+    coakka_http_host_outbound_call_t *call);
+COAKKA_MANAGED_API int32_t coakka_managed_cancel_outbound(
+    coakka_managed_host *host, coakka_http_host_outbound_call_t call);
+/* Interrupt is permanent for this run. The close owner uses it to join the
+ * sole reader before destroy. A taken result borrows spans until release. */
+COAKKA_MANAGED_API int32_t coakka_managed_interrupt_outbound(coakka_managed_host *host);
+COAKKA_MANAGED_API int32_t coakka_managed_take_outbound(
+    coakka_managed_host *host, uint64_t timeout_ms, coakka_managed_outbound_result *out);
+COAKKA_MANAGED_API uint8_t coakka_managed_outbound_header(
+    const coakka_managed_host *host, uint32_t index, coakka_http_host_header_t *out);
+COAKKA_MANAGED_API int32_t coakka_managed_release_outbound(coakka_managed_host *host);
+
 COAKKA_MANAGED_API int32_t coakka_managed_start_with_issue(
     coakka_managed_host *host, coakka_http_host_issue_t *issue);
 COAKKA_MANAGED_API int32_t coakka_managed_monitor_snapshot(
@@ -136,6 +186,17 @@ COAKKA_MANAGED_API int32_t coakka_managed_rebind(
     coakka_managed_host *host, uint64_t activation_id, uint64_t route_generation,
     uint64_t route_id, uint64_t binding_revision, uint64_t new_binding_id,
     coakka_http_host_rebind_outcome_t *outcome);
+
+/* Borrow input spans until return. Serialize both calls with start and destroy.
+ * An OK reload returns the Core outcome, including an effective snapshot on refusal. */
+COAKKA_MANAGED_API int32_t coakka_managed_tls_credentials(
+    coakka_managed_host *host, coakka_http_host_tls_credentials_t *out);
+COAKKA_MANAGED_API int32_t coakka_managed_reload_tls(
+    coakka_managed_host *host, uint32_t security, uint32_t mode,
+    uint64_t expected_generation, uint64_t credential_generation,
+    coakka_http_host_bytes_t credential_id, coakka_http_host_bytes_t certificate,
+    coakka_http_host_bytes_t key, coakka_http_host_bytes_t trust_roots,
+    coakka_http_host_tls_reload_outcome_t *out);
 
 /* These calls borrow inputs until return. Core owns accepted response bytes. */
 COAKKA_MANAGED_API int32_t coakka_managed_start_response_stream(
